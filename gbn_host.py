@@ -36,31 +36,39 @@ class GBNHost():
     # @param checksum: checksum from payload
     # @param payload: string message to be packed
     def make_pkt(self, packet_type, packet_number, checksum, payload):
-        print("Making")
         packet_length = len(payload)
         packet_byte_array = pack("!HiHI"+str(packet_length)+"s", 
-            packet_type, packet_number, checksum, packet_length, payload.encode())
-        if checksum == 0:
-            checksum, corrupt = self.is_corrupt(packet_byte_array)
+            packet_type, packet_number, 0, packet_length, payload.encode())
+
+        checksum = self.get_checksum(packet_byte_array)
+
         return pack("!HiHI"+str(packet_length)+"s", 
             packet_type, packet_number, checksum, packet_length, payload.encode())
         
 
     def extract_payload(self, payload):
-        packet_type = unpack('!H', payload[:2])[0]
-        packet_number = unpack('!i', payload[2:6])[0]
-        checksum = unpack('!H', payload[6:8])[0]
-        payload_length = unpack('!I', payload[8:12])[0]
-        message = unpack('!'+str(payload_length)+'s', payload[12:])[0]
+        try:
+            packet_type = unpack('!H', payload[:2])[0]
+            packet_number = unpack('!i', payload[2:6])[0]
+            checksum = unpack('!H', payload[6:8])[0]
+            payload_length = unpack("!I", payload[8:12])[0]
+            message = unpack('!'+str(payload_length)+'s', payload[12:])[0]
+        except:
+            return [0, 0, 0, 0, ""]
         return [packet_type, packet_number, checksum, payload_length, message.decode()]
 
-    def checksum_ACK(self):
-        payload = ""
-        packet_byte_array = pack("!0s", payload.encode())
-        checksum, corrupt = self.is_corrupt(packet_byte_array)
+    def get_checksum(self, packet):
+        if len(packet) % 2 == 1:
+            packet = packet + bytes(1)
+        
+        summed_words = 0
+        for i in range(0, len(packet), 2):#16 bit words
+            word = packet[i] << 8 | packet[i+1] 
+            summed_words += word
+        result = (summed_words & 0xffff) + (summed_words >> 16)
+
+        checksum = ~result & 0xffff
         return checksum
-
-
 
     ###########################################################################################################
     ## Core Interface functions that are called by Simulator
@@ -68,12 +76,13 @@ class GBNHost():
     # This function implements the SENDING functionality. It should implement retransmit-on-timeout. 
     # Refer to the GBN sender flowchart for details about how this function should be implemented
     def receive_from_application_layer(self, payload):
+        print("NSN: ", self.next_seq_num)
         if self.next_seq_num < (self.window_base + self.window_size):
-            #print("Start")
             self.unACKed_buffer.append(self.make_pkt(128, self.next_seq_num, 0, payload))
             self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
             if self.window_base == self.next_seq_num:
                 self.simulator.start_timer(self.entity, self.timer_interval)
+                self.window_base = 0
             self.next_seq_num += 1
         else:
             self.app_layer_buffer.append(payload)
@@ -87,38 +96,38 @@ class GBNHost():
     # Refer to the GBN receiver flowchart for details about how to implement responding to data pkts, and
     # refer to the GBN sender flowchart for details about how to implement responidng to ACKs
     def receive_from_network_layer(self, byte_data):
-        #print("Receiving from network layer")
-        checksum, corrupt = self.is_corrupt(byte_data)
         data = self.extract_payload(byte_data)
-        #print("Data, ", data)
-        
-        if data[0] == 0:#Ack, so we're a sender
-            if not corrupt:
-                #print("Sender")
-                ack_num = data[1] 
-                if ack_num >= self.window_base:
-                    self.window_base = ack_num + 1
-                    self.simulator.stop_timer(self.entity)
-                    if self.window_base != self.next_seq_num:
+        corrupt = self.is_corrupt(byte_data)
+        payload = data[4]
+        if data[0] == 0 and not corrupt: 
+            ack_num = data[1] 
+            if ack_num >= self.window_base:
+                self.window_base = ack_num + 1
+                self.simulator.stop_timer(self.entity)
+                if self.window_base != self.next_seq_num:
+                   self.simulator.start_timer(self.entity, self.timer_interval)
+                while (len(self.app_layer_buffer) > 0) and (self.next_seq_num < (self.window_base + self.window_size)):
+                    payload = self.app_layer_buffer.pop()
+                    print("Pre-Unacked, ", self.next_seq_num)
+                    #Make an ACK corresponding to the same NSN
+                    self.unACKed_buffer.append(self.make_pkt(128, self.next_seq_num, 0, payload))
+                    print("Post-Unacked")
+                    self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
+                    if self.window_base == self.next_seq_num:
                         self.simulator.start_timer(self.entity, self.timer_interval)
-                    while (len(self.app_layer_buffer) > 0) and (self.next_seq_num < (self.window_base + self.window_size)):
-                        payload = self.app_layer_buffer.pop(0)
-                        self.unACKed_buffer[self.next_seq_num] = self.make_pkt(128, self.next_seq_num, checksum, payload)
-                        self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
-                        if self.window_base == self.next_seq_num:
-                            self.simulator.start_timer(self.entity, self.timer_interval)
-                        self.next_seq_num += 1
-            elif corrupt:
-                return
-        elif data[0] == 128:#Data, so we're a receiver
-            #print("Receiver")
-            if not corrupt and (data[1] == self.expected_seq_val):
-                self.simulator.pass_to_application_layer(self.entity, data[4])#ACK
-                self.last_ACK = self.make_pkt(0, self.expected_seq_val, 0, "")
-                self.simulator.pass_to_network_layer(self.entity, self.last_ACK, True)
+                    self.next_seq_num += 1
+        elif data[0] == 128: #Receiver
+            corrupt = self.is_corrupt(byte_data)
+            if not corrupt and data[1] == self.expected_seq_val:
+                #print("data[1] == self.expected_seq_val")
+                self.simulator.pass_to_application_layer(self.entity, data[4])
+                self.last_ACK = self.make_pkt(0, self.expected_seq_val, 0, "") #ACK
+                self.simulator.pass_to_network_layer(self.entity, self.last_ACK, True) #ACK
                 self.expected_seq_val += 1
-            elif corrupt or (data[1] != self.expected_seq_val):
+            else:
+                #print("Corrupt or data[1] != self.expected_seq_val")
                 self.simulator.pass_to_network_layer(self.entity, self.last_ACK, True)
+            #self.last_ACK = self.make_pkt(0, -1, 0, "")
 
 
 
@@ -130,27 +139,20 @@ class GBNHost():
             self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[i], False)
 
 
-
-
     # This function should check to determine if a given packet is corrupt. The packet parameter accepted
     # by this function should contain a byte array
     def is_corrupt(self, packet):
-        #print("Checking...")
         if len(packet) % 2 == 1:
             packet = packet + bytes(1)
-        #print("len")
+
         summed_words = 0
         for i in range(0, len(packet), 2):#16 bit words
             word = packet[i] << 8 | packet[i+1] 
             summed_words += word
+        corrupt = (summed_words & 0xffff) + (summed_words >> 16)
+        #print("corrupt? ", corrupt)
 
-        #print("looped")
-        result = (summed_words & 0xffff) + (summed_words >> 16)
-        checksum = ~result & 0xffff
-        ones_complement = summed_words + checksum
-        #print("Checksum: ", checksum, " Corrupt: ", ones_complement)
-        #print("Corrupt? Idk: ", corruption)
-        if ones_complement > 65530:
-            return checksum, 0
+        if corrupt == 65535:
+            return False
         else:
-            return checksum, 1
+            return True
