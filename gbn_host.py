@@ -82,7 +82,7 @@ class GBNHost():
             self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
             if self.window_base == self.next_seq_num:
                 self.simulator.start_timer(self.entity, self.timer_interval)
-                self.window_base = 0
+                #self.window_base = 0
             self.next_seq_num += 1
         else:
             self.app_layer_buffer.append(payload)
