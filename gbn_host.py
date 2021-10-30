@@ -1,3 +1,4 @@
+
 from network_simulator import NetworkSimulator, Packet, EventEntity
 from enum import Enum
 from struct import pack, unpack
@@ -38,12 +39,12 @@ class GBNHost():
     def make_pkt(self, packet_type, packet_number, checksum, payload):
         packet_length = len(payload)
         packet_byte_array = pack("!HiHI"+str(packet_length)+"s", 
-            packet_type, packet_number, 0, packet_length, payload.encode())
+            packet_type, packet_number, 0, packet_length, payload.encode('utf-8'))
 
         checksum = self.get_checksum(packet_byte_array)
 
         return pack("!HiHI"+str(packet_length)+"s", 
-            packet_type, packet_number, checksum, packet_length, payload.encode())
+            packet_type, packet_number, checksum, packet_length, payload.encode('utf-8'))
         
 
     def extract_payload(self, payload):
@@ -76,13 +77,12 @@ class GBNHost():
     # This function implements the SENDING functionality. It should implement retransmit-on-timeout. 
     # Refer to the GBN sender flowchart for details about how this function should be implemented
     def receive_from_application_layer(self, payload):
-        print("NSN: ", self.next_seq_num)
+        #print("NSN: ", self.next_seq_num)
         if self.next_seq_num < (self.window_base + self.window_size):
             self.unACKed_buffer.append(self.make_pkt(128, self.next_seq_num, 0, payload))
             self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
             if self.window_base == self.next_seq_num:
                 self.simulator.start_timer(self.entity, self.timer_interval)
-                #self.window_base = 0
             self.next_seq_num += 1
         else:
             self.app_layer_buffer.append(payload)
@@ -97,6 +97,7 @@ class GBNHost():
     # refer to the GBN sender flowchart for details about how to implement responidng to ACKs
     def receive_from_network_layer(self, byte_data):
         data = self.extract_payload(byte_data)
+        #rint(data)
         corrupt = self.is_corrupt(byte_data)
         payload = data[4]
         if data[0] == 0 and not corrupt: 
@@ -108,24 +109,26 @@ class GBNHost():
                    self.simulator.start_timer(self.entity, self.timer_interval)
                 while (len(self.app_layer_buffer) > 0) and (self.next_seq_num < (self.window_base + self.window_size)):
                     payload = self.app_layer_buffer.pop()
-                    print("Pre-Unacked, ", self.next_seq_num)
+                    #print("Pre-Unacked, ", self.next_seq_num)
                     #Make an ACK corresponding to the same NSN
                     self.unACKed_buffer.append(self.make_pkt(128, self.next_seq_num, 0, payload))
-                    print("Post-Unacked")
+                    #print("Post-Unacked")
                     self.simulator.pass_to_network_layer(self.entity, self.unACKed_buffer[self.next_seq_num], False)
                     if self.window_base == self.next_seq_num:
                         self.simulator.start_timer(self.entity, self.timer_interval)
                     self.next_seq_num += 1
-        elif data[0] == 128: #Receiver
+        elif data[0] == 0 and corrupt: 
+            self.simulator.pass_to_network_layer(self.entity, self.last_ACK, True)
+        else: #Receiver
             corrupt = self.is_corrupt(byte_data)
-            if not corrupt and data[1] == self.expected_seq_val:
-                #print("data[1] == self.expected_seq_val")
+            if not corrupt and data[1] == self.expected_seq_val and data[3] != 0:
+                #print("ok")
                 self.simulator.pass_to_application_layer(self.entity, data[4])
                 self.last_ACK = self.make_pkt(0, self.expected_seq_val, 0, "") #ACK
                 self.simulator.pass_to_network_layer(self.entity, self.last_ACK, True) #ACK
                 self.expected_seq_val += 1
             else:
-                #print("Corrupt or data[1] != self.expected_seq_val")
+                #print("!ok")
                 self.simulator.pass_to_network_layer(self.entity, self.last_ACK, True)
             #self.last_ACK = self.make_pkt(0, -1, 0, "")
 
